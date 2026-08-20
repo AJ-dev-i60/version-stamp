@@ -1,6 +1,12 @@
-// Nuxt 3. Also add `COPY --from=version /VERSION ./VERSION` to the BUILDER
-// stage as well as the runtime stage — nuxt.config runs at build time and
-// needs to read the file.
+// Nuxt 3. nuxt.config runs during the BUILD stage, not the runtime stage, so it
+// cannot read the VERSION file the runtime stage writes. Give the build stage
+// the value directly instead — in that stage of the Dockerfile:
+//
+//   ARG APP_VERSION="dev unknown"
+//   ENV APP_VERSION=$APP_VERSION
+//
+// The readFileSync fallback covers the optional in-build git stage, where a
+// VERSION file does sit next to the working directory.
 
 import { readFileSync } from 'node:fs'
 

@@ -1,25 +1,21 @@
 # --- build version stamp -----------------------------------------------------
-# Add this stage at the TOP of your Dockerfile. It is identical in every
-# project; substitute your timezone wherever Africa/Johannesburg appears.
+# The stamp is handed to the build as APP_VERSION. Nothing here reads git,
+# because most build platforms do not expose .git to the build context —
+# Coolify, for one, exposes neither .git nor the commit SHA.
 #
-# Writes one line to /VERSION:  v{YY}.{MM}.{DD}.{HHMM} {short-sha}
-# taken from the commit's own timestamp, so rebuilding the same commit
-# produces the same version string.
+# Place this as LATE as possible in the runtime stage: the value changes every
+# commit, so anything below it rebuilds on every deploy. Last is best.
 #
-# tzdata is NOT optional: without it musl silently falls back to UTC and
-# every timestamp is wrong by your offset, while still looking plausible.
+# If the image drops to a non-root user, keep it BEFORE the USER instruction so
+# the file lands root-owned and world-readable.
+#
+# Do NOT put this at the top of the file if the Dockerfile opens with a parser
+# directive such as `# syntax=docker/dockerfile:1` — those are only honoured on
+# line 1, and Docker silently ignores them anywhere else.
 
-FROM alpine:3.20 AS version
-RUN apk add --no-cache git tzdata
-WORKDIR /src
-COPY .git .git
-RUN TZ=Africa/Johannesburg git log -1 \
-      --date=format-local:'%y.%m.%d.%H%M' \
-      --format='v%cd %h' > /VERSION \
-    || echo 'dev unknown' > /VERSION
+ARG APP_VERSION="dev unknown"
+RUN printf '%s\n' "$APP_VERSION" > ./VERSION
 
-# --- then, in your RUNTIME stage, after its WORKDIR --------------------------
-# If the image drops to a non-root user, put this BEFORE the USER instruction:
-# the file lands root-owned and world-readable, which is what you want.
-#
-#   COPY --from=version /VERSION ./VERSION
+# --- if a build stage also needs it (e.g. Nuxt reads it in nuxt.config) ------
+# ARG APP_VERSION="dev unknown"
+# ENV APP_VERSION=$APP_VERSION

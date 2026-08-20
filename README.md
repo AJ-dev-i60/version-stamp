@@ -8,9 +8,9 @@ preflight, ask, implement, verify, hand back. Do not summarise it back and wait
 for permission to start — Step 2 is where you ask them anything.
 
 A build-version readout for any Dockerised app: the git commit that produced the
-image, visible on the page and queryable as JSON. Stack-agnostic — worked
-examples for Python/FastAPI and Nuxt/Node, and the contract is four lines long,
-so any other stack is a five-minute port.
+running image, visible on the page and queryable as JSON. Stack-agnostic —
+worked examples for Python/FastAPI and Nuxt/Node, and the contract is four lines
+long, so any other stack is a five-minute port.
 
 ## What you get
 
@@ -21,17 +21,43 @@ SHA — displayed on the page and returned by an endpoint:
 GET /version  →  {"version": "v26.08.20.1042", "commit": "a1b2c3d"}
 ```
 
-Three properties that matter:
-
-- **Stable per commit.** Rebuilding the same commit produces the same string. It
+- **Stable per commit.** The same commit always produces the same string. It
   identifies the *code*, not the deploy.
 - **Traceable.** The SHA answers "is production running what I think it is" in
   one command. A timestamp alone cannot — that is the lesson from the project
   this was extracted from, which sat 26 commits behind production without anyone
   noticing.
-- **Zero configuration on the host.** No build args, no environment variables, no
-  CI changes. It works on a plain Coolify "deploy from git with a Dockerfile" app
-  on the first build.
+- **Honest when it doesn't know.** A build that was not stamped reports
+  `unstamped`, never a leftover value from an earlier deploy. A confidently
+  wrong version string is worse than none: it defeats the entire purpose.
+
+## How it works
+
+Most build platforms **do not expose `.git` to the Docker build**. Coolify
+exposes neither `.git` nor the commit SHA — it passes `COOLIFY_BRANCH`,
+`COOLIFY_FQDN`, `COOLIFY_URL` and `COOLIFY_RESOURCE_UUID`, and nothing that
+identifies the commit. So the build cannot compute its own version, and any
+recipe that tries fails outright:
+
+```
+COPY .git .git
+ERROR: failed to compute cache key: "/.git": not found
+```
+
+Instead, **whoever knows git computes the stamp and hands it to the build** as
+`APP_VERSION`. Three lines in the Dockerfile, and one supplier depending on how
+the app is deployed:
+
+| Deployed by | Supplier |
+|---|---|
+| Coolify | [`snippets/coolify-deploy.sh`](snippets/coolify-deploy.sh) — stamps, deploys, asserts, then resets |
+| CI (GitHub Actions etc.) | `--build-arg APP_VERSION="$(TZ=… git log -1 …)"` in the build step |
+| Plain `docker build` | the same `--build-arg` on the command line |
+
+If your builder genuinely does have `.git` and you would rather it computed the
+stamp itself, [`snippets/Dockerfile.git-stage`](snippets/Dockerfile.git-stage) is
+the appendix for that. It is not the default because it does not survive contact
+with most platforms.
 
 ---
 
@@ -41,24 +67,26 @@ Check these and report them alongside your questions:
 
 1. **Dockerfile present?** Find it and identify the final (runtime) stage. If
    there is no Dockerfile, say so and jump to [Non-Docker builds](#non-docker-builds).
-2. **Is `.git` in the build context?** Read `.dockerignore`. If it excludes
-   `.git`, that line must go or the stamp cannot be computed — `.dockerignore` is
-   global to the build, there is no per-stage exception. This is the single most
-   common cause of this recipe failing, and it is easy to miss because ignoring
-   `.git` is a common default. Un-ignoring it costs build-context transfer size
-   only; it does not invalidate your app layers unless that stage copies the
-   whole context.
-3. **Real git repo with at least one commit?** `git rev-parse --short HEAD`.
-4. **Existing surfaces.** Is there already a health endpoint (`/healthz`,
+2. **Does line 1 hold a parser directive** such as `# syntax=docker/dockerfile:1`?
+   If so it must stay on line 1 — Docker honours those nowhere else and silently
+   treats them as an ordinary comment.
+3. **How does this app reach production?** Look for `.github/workflows/`, a
+   deploy script, a `docs/deployment.md`, or Coolify references. Say what you
+   found; you will confirm it in question 5 rather than guessing.
+4. **Real git repo with at least one commit?** `git rev-parse --short HEAD`.
+5. **Existing surfaces.** Is there already a health endpoint (`/healthz`,
    `/api/health`), a footer, or a version string of some kind? Say what you found
    — you will offer to reuse it.
-5. **Is there global auth?** If every route sits behind a middleware or a
+6. **Is there global auth?** If every route sits behind a middleware or a
    router-wide dependency, a new `/version` inherits it and the page's own fetch
    gets a redirect instead of JSON. Check how the health endpoint is exempted and
    treat this one the same way. Per-route dependencies need nothing — the new
    route is simply public.
 
-## Step 2 — Ask these five, in one message, with the defaults shown
+Do not commit or push unless the user asks, and never straight to a deployment
+branch of a live app without saying so first.
+
+## Step 2 — Ask these, in one message, with the defaults shown
 
 1. **Install the version stamp into this project?** (yes / no — if no, stop here)
 2. **Which surfaces?** JSON endpoint · visible on the page · **both**
@@ -67,39 +95,41 @@ Check these and report them alongside your questions:
    the health endpoint found in preflight *(default: new `/version` — it stays
    independent of health-check semantics)*
 4. **Show the commit SHA on the page?** *(default: yes)* — say no for a
-   public-facing app where the SHA should stay in the endpoint only. The
-   timestamp version still shows.
-5. **Timezone for the timestamp?** *(default: Africa/Johannesburg)*
+   public-facing app where the SHA should stay in the endpoint only.
+5. **Confirm the deploy path** you identified in preflight, so the right supplier
+   gets wired up: Coolify · CI · plain `docker build`.
+6. **Timezone for the timestamp?** *(default: Africa/Johannesburg)*
 
-If they answer "defaults", proceed with all defaults.
+If they answer "defaults", take the defaults and your own preflight answer for 5.
 
 ## Step 3 — Implement
 
 Copy the files from [`snippets/`](snippets) rather than retyping them.
 
-### 3a. The stamp stage
+### 3a. The stamp
 
-Add [`snippets/Dockerfile.stamp`](snippets/Dockerfile.stamp) to the **top** of the
-Dockerfile, substituting the timezone from question 5. Then add one line to the
-**runtime** stage, after its `WORKDIR` and alongside the other `COPY` lines:
+Add [`snippets/Dockerfile.stamp`](snippets/Dockerfile.stamp) — an `ARG` and a
+one-line `RUN` — **as late as possible in the runtime stage**. The value changes
+every commit, so everything below it rebuilds on every deploy; last is best. If
+the image drops to a non-root user, keep it before the `USER` instruction.
 
-```dockerfile
-COPY --from=version /VERSION ./VERSION
-```
+### 3b. The supplier
 
-If the image drops to a non-root user, put that line *before* the `USER`
-instruction — the file lands root-owned and world-readable, which is what you
-want.
+| Deployed by | Do this |
+|---|---|
+| Coolify | Copy [`snippets/coolify-deploy.sh`](snippets/coolify-deploy.sh) to `scripts/deploy.sh` and fill in the API URL, app UUID and site URL at the top. Read the note in Step 4 about the reset. |
+| CI | Add the build arg to the existing build step: `--build-arg APP_VERSION="$(TZ=Africa/Johannesburg git log -1 --date=format-local:'%y.%m.%d.%H%M' --format='v%cd %h')"` |
+| Plain docker build | The same flag, documented in the README so people use it. |
 
-### 3b. Read it
+### 3c. Read it
 
 | Stack | Files |
 |---|---|
 | Python / FastAPI | [`snippets/version.py`](snippets/version.py) → `app/version.py`, and [`snippets/version_route.py`](snippets/version_route.py) for the endpoint |
-| Nuxt / Node | [`snippets/nuxt.config.snippet.ts`](snippets/nuxt.config.snippet.ts) — note it also needs the `COPY --from=version` line in the **builder** stage, because `nuxt.config` reads the file at build time |
+| Nuxt / Node | [`snippets/nuxt.config.snippet.ts`](snippets/nuxt.config.snippet.ts) — note `nuxt.config` runs in the *build* stage, so that stage needs `ARG APP_VERSION` + `ENV APP_VERSION=$APP_VERSION` too |
 | Anything else | The whole contract: **env `APP_VERSION` wins, else read the `VERSION` file, else `"dev unknown"`; split on whitespace into version and commit.** |
 
-### 3c. Show it
+### 3d. Show it
 
 | Page type | File |
 |---|---|
@@ -108,82 +138,88 @@ want.
 
 ## Step 4 — Verify before reporting done
 
-Steps 1–3 are the hard gate and work for any app. Step 4 needs the app to
-actually boot, which plenty cannot do locally — a database, a mounted volume, a
-model download on first start. Attempt it; if the app will not start for reasons
-unrelated to this change, say so plainly and fall back to the post-deploy check
-in Step 5 rather than burning an hour on it.
+**Do not report success on the strength of the code looking right.** State which
+of these you actually ran.
 
 ```bash
-# 1. what the version SHOULD be, computed on the host
+# 1. what the version SHOULD be
 TZ=Africa/Johannesburg git log -1 --date=format-local:'%y.%m.%d.%H%M' --format='v%cd %h'
 
-# 2. the image builds
-docker build -t version-check .
+# 2. the reader works — run it directly, both paths (env set, and env unset with
+#    a VERSION file present). This needs no Docker and no running app.
 
-# 3. the stamp is in the image and matches (1) — the decisive check
+# 3. if Docker is available locally:
+docker build --build-arg APP_VERSION="$(TZ=Africa/Johannesburg git log -1 \
+  --date=format-local:'%y.%m.%d.%H%M' --format='v%cd %h')" -t version-check .
 docker run --rm --entrypoint cat version-check ./VERSION
 
-# 4. the endpoint serves it — only if the app boots with no external deps
-docker run --rm -d -p 8099:APP_PORT --name version-check version-check
-sleep 3 ; curl -s localhost:8099/version ; docker rm -f version-check
+# 4. after deploying: the live app must agree with the commit
+curl -s https://YOUR-DOMAIN/version | grep -o '"commit":"[^"]*"'
+git rev-parse --short HEAD
 ```
 
-Done means: the build is green, and step 3's output is character-for-character
-identical to step 1. Report step 4 as passed, skipped or failed — never as
-assumed. If it was skipped, the post-deploy check below is what closes the loop,
-so make sure they know that.
+Docker is frequently unavailable on the workstation — if so, say so plainly;
+steps 2 and 4 still close the loop, and 4 is the one that actually matters.
+
+**The reset is load-bearing.** The deploy script sets `APP_VERSION`, deploys,
+asserts the live `/version` matches, and then resets the stored value to
+`unstamped unknown`. Coolify remembers the last value and reuses it, so without
+that reset a later webhook or UI deploy would rebuild new code carrying the
+previous deploy's version — silently, plausibly wrong. With it, an unstamped
+build says so. Do not "tidy up" the reset.
 
 ## Step 5 — Hand back
 
-Say what changed (three files, typically), paste the verified version string, and
-give them the check to run once it is deployed:
-
-```bash
-# is the deployed app running the commit I think it is?
-curl -s https://YOUR-DOMAIN/version | grep -o '"commit":"[^"]*"'
-git rev-parse --short origin/main
-```
+Say what changed, paste the verified version string, and tell them how to deploy
+from now on — for Coolify, that a plain `git push` will now show `unstamped`
+until they run the deploy script, and that this is deliberate.
 
 ---
 
 ## Traps
 
-- **`.dockerignore` excluding `.git`.** The stamp stage's `COPY .git .git` fails
-  the build outright. That is the good outcome: it fails loudly at install time
-  instead of silently shipping `dev unknown` forever.
-- **Missing `tzdata` on Alpine.** musl has no built-in zone database, so named
-  timezones silently degrade to UTC. The version looks perfectly plausible and is
-  wrong by your UTC offset.
-- **Computing the version at container start instead of build time.** The runtime
-  image has no `.git` and no git binary, so it can only report the *deploy* time.
-  That is a different fact, and a less useful one — it cannot tell you what code
-  is running.
-- **Timestamp without a SHA.** Two commits in the same minute collide, and no
-  timestamp maps back to a commit without a lookup. Always carry the short SHA.
+- **The platform has no `.git`.** The reason the build arg is the primary
+  mechanism. Coolify supplies neither `.git` nor a commit SHA, and there is no
+  toggle for it. If you inherit a project that computes its version by shelling
+  out to git during the build, check whether that call is silently failing into a
+  fallback — a version string that is really a *build* timestamp looks completely
+  normal and answers a different question than the one you are asking.
+- **A stale stamp is worse than none.** See the reset, above.
+- **Parser directives only work on line 1.** Prepending anything above
+  `# syntax=docker/dockerfile:1` disables it silently.
+- **Edge-cached static assets.** If a CDN caches your CSS and JS (Cloudflare's
+  default is four hours), the deploy that adds the badge ships new HTML
+  referencing old assets, and the badge renders unstyled and empty. Check for it,
+  and consider a cache-busting query string keyed to the version you just added —
+  the stamp makes that easy.
 - **A trailing newline in the file.** The `.strip()` / `.trim()` in the reader
   handles it. Do not remove those calls.
 - **Public app, private repo.** A commit SHA is not a secret, but it does confirm
   which build is live. If that matters, answer *no* to question 4 and keep the
   SHA in the endpoint.
+- **`tzdata` on Alpine** (only relevant to the optional git stage): musl has no
+  built-in zone database, so named timezones silently degrade to UTC.
 
 ## Non-Docker builds
 
-The contract is unchanged; only the stamping step moves. Write the `VERSION` file
-in whatever step produces the deployable artefact — CI job, `make build`,
-packaging script — with the same one-liner:
+The contract is unchanged; only the supplier moves. Write the `VERSION` file in
+whatever step produces the deployable artefact — CI job, `make build`, packaging
+script:
 
 ```bash
 TZ=Africa/Johannesburg git log -1 --date=format-local:'%y.%m.%d.%H%M' --format='v%cd %h' > VERSION
 ```
 
-The reader code stays as-is, and `APP_VERSION` remains available as an override
-for environments with no git history.
+The reader stays as-is, and `APP_VERSION` remains available as an override.
 
 ## Where this came from
 
-Extracted from TableTopCafe, which computed the same scheme inside
-`nuxt.config.ts` by shelling out to git during the Nuxt build. That works, but it
-ties the mechanism to one framework's config file and needs a git binary in the
-language builder image. Moving the computation into a throwaway Alpine stage
-makes it portable, and adds the commit SHA, which the original scheme lacked.
+Extracted from TableTopCafe, which computed the stamp inside `nuxt.config.ts` by
+shelling out to git during the Nuxt build — a call that, on Coolify, has been
+failing into its build-timestamp fallback all along without anyone noticing.
+
+The first outside install, into a FastAPI app on Coolify, is what turned that up:
+the `.git` stage failed hard on the first build, which is how the build-arg
+design here came to be the default rather than the escape hatch. The reset
+behaviour and the parser-directive and edge-cache traps all came from that same
+install.

@@ -1,0 +1,26 @@
+# --- OPTIONAL: compute the stamp inside the build ----------------------------
+# Only usable when .git is genuinely present in the build context: a plain
+# `docker build` from a working checkout, or CI that checks out with history.
+#
+# It does NOT work on Coolify, which does not place .git in the context. The
+# failure is total and loud:
+#     COPY .git .git
+#     ERROR: failed to compute cache key: "/.git": not found
+#
+# Prefer snippets/Dockerfile.stamp (the APP_VERSION build arg). Reach for this
+# only if you want a stamp with no external supplier at all.
+#
+# tzdata is NOT optional: without it musl silently falls back to UTC and every
+# timestamp is wrong by your offset, while still looking plausible.
+
+FROM alpine:3.20 AS version
+RUN apk add --no-cache git tzdata
+WORKDIR /src
+COPY .git .git
+RUN TZ=Africa/Johannesburg git log -1 \
+      --date=format-local:'%y.%m.%d.%H%M' \
+      --format='v%cd %h' > /VERSION \
+    || echo 'dev unknown' > /VERSION
+
+# then, in the runtime stage, before any USER switch:
+#   COPY --from=version /VERSION ./VERSION
