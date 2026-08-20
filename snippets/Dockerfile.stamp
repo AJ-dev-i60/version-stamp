@@ -1,0 +1,25 @@
+# --- build version stamp -----------------------------------------------------
+# Add this stage at the TOP of your Dockerfile. It is identical in every
+# project; substitute your timezone wherever Africa/Johannesburg appears.
+#
+# Writes one line to /VERSION:  v{YY}.{MM}.{DD}.{HHMM} {short-sha}
+# taken from the commit's own timestamp, so rebuilding the same commit
+# produces the same version string.
+#
+# tzdata is NOT optional: without it musl silently falls back to UTC and
+# every timestamp is wrong by your offset, while still looking plausible.
+
+FROM alpine:3.20 AS version
+RUN apk add --no-cache git tzdata
+WORKDIR /src
+COPY .git .git
+RUN TZ=Africa/Johannesburg git log -1 \
+      --date=format-local:'%y.%m.%d.%H%M' \
+      --format='v%cd %h' > /VERSION \
+    || echo 'dev unknown' > /VERSION
+
+# --- then, in your RUNTIME stage, after its WORKDIR --------------------------
+# If the image drops to a non-root user, put this BEFORE the USER instruction:
+# the file lands root-owned and world-readable, which is what you want.
+#
+#   COPY --from=version /VERSION ./VERSION

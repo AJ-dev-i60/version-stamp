@@ -1,0 +1,23 @@
+<!-- Static or client-rendered pages: the badge reads its own endpoint, so no
+     templating is required. Style it as de-emphasised text — this readout is
+     for whoever goes looking for it, not a headline. -->
+
+<span id="build-version" class="build-version"></span>
+
+<script>
+  fetch('/version')
+    .then(r => r.json())
+    .then(v => {
+      document.getElementById('build-version').textContent =
+        v.commit && v.commit !== 'unknown' ? v.version + ' · ' + v.commit : v.version
+    })
+    .catch(() => {})
+</script>
+
+<style>
+  .build-version {
+    font-size: 0.75rem;
+    opacity: 0.6;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
